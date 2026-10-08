@@ -1,0 +1,9 @@
+release: bootstrap-0
+# Placeholder — replaced by first tested build. Fields mirror
+# REPOSITORY_MAP.md §5 contract.
+components:
+  ewcp_product:        { ref: "TBD" }
+  ewcp_kernel:         { ref: "TBD" }
+  erpnext:             { ref: "7474d9e" }   # upstream v16.50.0 tip mirrored
+  erp_enterprise_app:  { ref: "TBD" }
+notes: "Seed manifest — fill SHAs from first tested integration build."
