@@ -1,0 +1,251 @@
+# B-G1' — local ERPNext v16 dev site (Docker Compose)
+#
+# Scope: DEV ONLY. Loopback bind, no TLS, no production claims.
+# Adapts the frappe_docker pwd.yml service topology
+# (mariadb + redis x2 + configurator + create-site + backend/frontend +
+#  queue x2 + scheduler + websocket) and adds:
+#   - erp-enterprise-app mounted as a custom app (vendor/ submodule)
+#   - a `seed` one-shot that installs fixtures + a scoped non-admin API user
+#
+# Prereqs: `git submodule update --init` (vendor/erp-enterprise-app),
+#          `cp .env.example .env` (then edit secrets).
+
+name: ${COMPOSE_PROJECT_NAME:-ewcp-erp-dev}
+
+x-app-service: &app-service
+  image: ${ERPNEXT_IMAGE:?Set ERPNEXT_IMAGE in .env — see .env.example}
+  entrypoint: ["/usr/local/bin/ewcp-dev-entrypoint.sh"]
+  volumes:
+    - sites:/home/frappe/frappe-bench/sites
+    - logs:/home/frappe/frappe-bench/logs
+    # custom app bind-mounted under its MODULE name so `ls apps` writes a
+    # correct apps.txt and `pip install -e` picks it up.
+    - ./vendor/erp-enterprise-app:/home/frappe/frappe-bench/apps/erp_enterprise_app
+    - ./docker/dev-entrypoint.sh:/usr/local/bin/ewcp-dev-entrypoint.sh:ro
+
+services:
+  backend:
+    <<: *app-service
+    command: ["start.sh"]  # gunicorn frappe.app:application on :8000
+    depends_on:
+      db:
+        condition: service_healthy
+      configurator:
+        condition: service_completed_successfully
+      create-site:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  configurator:
+    <<: *app-service
+    entrypoint: ["bash", "-c"]
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host $$DB_HOST;
+        bench set-config -gp db_port $$DB_PORT;
+        bench set-config -g redis_cache "redis://$$REDIS_CACHE";
+        bench set-config -g redis_queue "redis://$$REDIS_QUEUE";
+        bench set-config -g redis_socketio "redis://$$REDIS_QUEUE";
+        bench set-config -gp socketio_port $$SOCKETIO_PORT;
+    environment:
+      DB_HOST: db
+      DB_PORT: "3306"
+      REDIS_CACHE: redis-cache:6379
+      REDIS_QUEUE: redis-queue:6379
+      SOCKETIO_PORT: "9000"
+    deploy:
+      restart_policy:
+        condition: none
+
+  create-site:
+    <<: *app-service
+    command:
+      - bash
+      - -c
+      - >
+        wait-for-it -t 180 db:3306;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Waiting for sites/common_site_config.json to be created";
+          sleep 5;
+          if (( `date +%s`-start > 180 )); then
+            echo "could not find sites/common_site_config.json with required keys";
+            exit 1
+          fi
+        done;
+        echo "sites/common_site_config.json found";
+        if [ -d "sites/$$SITE_NAME" ]; then
+          echo "Site $$SITE_NAME already exists, skipping creation";
+        else
+          bench new-site --mariadb-user-host-login-scope='%' --admin-password="$$ADMIN_PASSWORD" --db-root-username=root --db-root-password="$$DB_ROOT_PASSWORD" --install-app erpnext --set-default "$$SITE_NAME";
+        fi;
+        if bench --site "$$SITE_NAME" list-apps 2>/dev/null | grep -qw erp_enterprise_app; then
+          echo "erp_enterprise_app already installed";
+        else
+          ./env/bin/pip install -e ./apps/erp_enterprise_app;
+          bench --site "$$SITE_NAME" install-app erp_enterprise_app;
+        fi;
+        bench --site "$$SITE_NAME" set-config developer_mode 1;
+        bench --site "$$SITE_NAME" set-config mute_emails 1;
+        echo "create-site done";
+    environment:
+      SITE_NAME: ${SITE_NAME:-ewcp-dev.localhost}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      DB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    depends_on:
+      db:
+        condition: service_healthy
+      configurator:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: none
+
+  seed:
+    <<: *app-service
+    command:
+      - bash
+      - -c
+      - >
+        wait-for-it -t 120 db:3306 &&
+        /home/frappe/frappe-bench/env/bin/python /seed/seed_dev.py
+    environment:
+      SITE_NAME: ${SITE_NAME:-ewcp-dev.localhost}
+      SECRETS_OUT: /secrets/ewcp-agent.env
+    volumes:
+      - sites:/home/frappe/frappe-bench/sites
+      - logs:/home/frappe/frappe-bench/logs
+      - ./vendor/erp-enterprise-app:/home/frappe/frappe-bench/apps/erp_enterprise_app
+      - ./docker/dev-entrypoint.sh:/usr/local/bin/ewcp-dev-entrypoint.sh:ro
+      - ./scripts/seed_dev.py:/seed/seed_dev.py:ro
+      - ./secrets:/secrets
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: none
+
+  db:
+    image: ${MARIADB_IMAGE:?Set MARIADB_IMAGE in .env}
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-character-set-client-handshake
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?}
+    volumes:
+      - db-data:/var/lib/mysql
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  frontend:
+    <<: *app-service
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["nginx-entrypoint.sh"]
+    environment:
+      BACKEND: backend:8000
+      FRAPPE_SITE_NAME_HEADER: ${SITE_NAME:-ewcp-dev.localhost}
+      SOCKETIO: websocket:9000
+      UPSTREAM_REAL_IP_ADDRESS: 127.0.0.1
+      UPSTREAM_REAL_IP_HEADER: X-Forwarded-For
+      UPSTREAM_REAL_IP_RECURSIVE: "off"
+      PROXY_READ_TIMEOUT: 120
+      CLIENT_MAX_BODY_SIZE: 50m
+    depends_on:
+      - websocket
+      - backend
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  queue-long:
+    <<: *app-service
+    command: ["bench", "worker", "--queue", "long,default,short"]
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  queue-short:
+    <<: *app-service
+    command: ["bench", "worker", "--queue", "short,default"]
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  redis-queue:
+    image: ${REDIS_IMAGE:?Set REDIS_IMAGE in .env}
+    volumes:
+      - redis-queue-data:/data
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  redis-cache:
+    image: ${REDIS_IMAGE:?}
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  scheduler:
+    <<: *app-service
+    command: ["bench", "schedule"]
+    depends_on:
+      create-site:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+  websocket:
+    <<: *app-service
+    entrypoint: ["/usr/local/bin/entrypoint.sh"]
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    environment:
+      FRAPPE_REDIS_CACHE: redis://redis-cache:6379
+      FRAPPE_REDIS_QUEUE: redis://redis-queue:6379
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    deploy:
+      restart_policy:
+        condition: on-failure
+
+volumes:
+  db-data:
+  redis-queue-data:
+  sites:
+  logs:
+
+networks:
+  default:
+    driver: bridge
