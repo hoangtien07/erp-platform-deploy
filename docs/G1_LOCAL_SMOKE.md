@@ -25,7 +25,8 @@ HTTP 200
 
 ## 2. Scoped user, customer list — User Permission enforced
 
-Scoped user `ewcp-agent@ewcp.dev` (role `Accounts User`) with
+Scoped user `ewcp-agent@ewcp.dev` (roles `Accounts User` + `EWCP Write` —
+the A5b draft-PO write role installed by `erp_enterprise_app` fixtures) with
 `User Permission: Company → EWCP Dev Company A` (apply_to_all_doctypes=1) and
 `User Permission: Customer → EWCP Dev Customer A1`;
 `System Settings.apply_strict_user_permissions=1`.
