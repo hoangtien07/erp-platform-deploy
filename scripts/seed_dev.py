@@ -8,9 +8,10 @@ docs/A4A_READ_CONTRACT.md) needs:
   customer groups, UOMs, price lists) via install_fixtures.*
 - TWO companies (A + B) so User-Permission scoping has a cross-company axis
 - 2 Customers + 2 Items
-- scoped service user ``ewcp-agent@ewcp.dev`` (role: Accounts User only —
-  read coverage for Customer/Item/Company/Sales Invoice/PLE; NOT
-  Administrator, per FAC F4)
+- scoped service user ``ewcp-agent@ewcp.dev`` (roles: Accounts User —
+  read coverage for Customer/Item/Company/Sales Invoice/PLE per FAC F4 —
+  plus ``EWCP Write``, the A5b draft-PO write role installed by the app's
+  fixtures; NOT Administrator)
 - api_key/api_secret pair, written to $SECRETS_OUT
 - User Permissions: Company -> A only (apply_to_all_doctypes),
   Customer -> A1 only; System Settings apply_strict_user_permissions = 1
@@ -218,6 +219,30 @@ else:
             frappe.db.rollback()
             frappe.delete_doc("Sales Invoice", si.name, force=True, ignore_permissions=True)
 
+step("supplier (A5b write-path fixture)")
+SUPPLIER_A = "EWCP Dev Supplier A1"
+if not frappe.db.exists("Supplier Group", "Services"):
+    frappe.get_doc(
+        {
+            "doctype": "Supplier Group",
+            "supplier_group_name": "Services",
+            "parent_supplier_group": "All Supplier Groups",
+            "is_group": 0,
+        }
+    ).insert(ignore_permissions=True)
+    log("created Supplier Group Services")
+if not frappe.db.exists("Supplier", SUPPLIER_A):
+    frappe.get_doc(
+        {
+            "doctype": "Supplier",
+            "supplier_name": SUPPLIER_A,
+            "supplier_group": "Services",
+            "supplier_type": "Company",
+            "country": COUNTRY,
+        }
+    ).insert(ignore_permissions=True)
+    log(f"created Supplier {SUPPLIER_A}")
+
 step("system settings: strict user permissions")
 # set_single_value bypasses doc-level mandatory fields (language/time_zone are
 # unset pre-setup-wizard, so a full doc.save() raises MandatoryError)
@@ -237,7 +262,7 @@ if not frappe.db.exists("User", AGENT_USER):
             "enabled": 1,
             "user_type": "System User",
             "send_welcome_email": 0,
-            "roles": [{"role": "Accounts User"}],
+            "roles": [{"role": "Accounts User"}, {"role": "EWCP Write"}],
         }
     )
     user.insert(ignore_permissions=True)
@@ -245,7 +270,7 @@ else:
     user = frappe.get_doc("User", AGENT_USER)
     user.enabled = 1
     user.user_type = "System User"
-    user.set("roles", [{"role": "Accounts User"}])
+    user.set("roles", [{"role": "Accounts User"}, {"role": "EWCP Write"}])
 
 api_key = frappe.generate_hash(length=20)
 api_secret = frappe.generate_hash(length=20)
