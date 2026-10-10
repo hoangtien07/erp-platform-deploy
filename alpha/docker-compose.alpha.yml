@@ -1,0 +1,23 @@
+# Alpha overlay for the ERPNext stack.
+#   docker compose -f docker-compose.yml -f alpha/docker-compose.alpha.yml \
+#     --env-file .env -p ewcp-erp-alpha up -d
+#
+# What it changes vs the dev base:
+#   * seed service is moved behind a `seeds-off` profile that is never
+#     activated — `compose up` no longer re-runs seed_dev.py, so scoped
+#     API creds are not silently rotated on every boot. Alpha creds are
+#     provisioned from the secret store instead.
+#   * frontend publish is re-asserted as loopback-only. If the base file
+#     ever grows a wider bind, this overlay pins it back to 127.0.0.1.
+# Everything else already runs compose-internal (no published ports).
+name: ewcp-erp-alpha
+
+services:
+  seed:
+    profiles: ["seeds-off"]
+
+  frontend:
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    labels:
+      ewcp.profile: alpha
