@@ -16,17 +16,18 @@ fail() { FAIL=$((FAIL+1)); printf 'FAIL  %s — %s\n' "$1" "$2"; }
 # The audit only needs variable interpolation to succeed — synthetic
 # stand-ins are fine (no real values are inspected). A real .env may be
 # pointed at via DEPLOY_ENV_FILE.
+# operator-set values win — defaults only fill what is unset
 for kv in ERPNEXT_IMAGE=erpnext:v15 MARIADB_IMAGE=mariadb:11.8 \
           REDIS_IMAGE=redis:7-alpine SITE_NAME=ewcp-dev.localhost \
           DB_ROOT_PASSWORD=synth ADMIN_PASSWORD=synth HTTP_PORT=8080 \
           COMPOSE_PROJECT_NAME=ewcp-erp-alpha; do
-  export "${kv%%=*}=${kv#*=}"
+  name="${kv%%=*}"; [ -z "${!name+x}" ] && export "$name=${kv#*=}"
 done
 ENVFILE_ARG=(); [ -f "${DEPLOY_ENV_FILE:-}" ] && ENVFILE_ARG=(--env-file "$DEPLOY_ENV_FILE")
-cfg=$(docker compose -f "$DEPLOY_DIR/docker-compose.yml" \
+if cfg=$(docker compose -f "$DEPLOY_DIR/docker-compose.yml" \
       -f "$HERE/docker-compose.alpha.yml" "${ENVFILE_ARG[@]}" \
-      config --format json 2>/dev/null)
-bad=$(printf '%s' "$cfg" | python3 -c '
+      config --format json 2>/dev/null) && [ -n "$cfg" ]; then
+  bad=$(printf '%s' "$cfg" | python3 -c '
 import json, sys
 d = json.load(sys.stdin); out = []
 for name, svc in (d.get("services") or {}).items():
@@ -35,11 +36,14 @@ for name, svc in (d.get("services") or {}).items():
         if ip not in ("127.0.0.1", "::1"):
             out.append(f"{name}:{ip}:{p.get('published')}")
 print("\n".join(out))')
-if [ -z "$bad" ]; then
-  n=$(printf '%s' "$cfg" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(len(s.get("ports") or []) for s in (d.get("services") or {}).values()))')
-  pass "ports" "merged compose: $n published port(s), all loopback-bound"
+  if [ -z "$bad" ]; then
+    n=$(printf '%s' "$cfg" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(sum(len(s.get("ports") or []) for s in (d.get("services") or {}).values()))')
+    pass "ports" "merged compose: $n published port(s), all loopback-bound"
+  else
+    fail "ports" "non-loopback publish: $(printf '%s' "$bad" | tr '\n' ' ')"
+  fi
 else
-  fail "ports" "non-loopback publish: $(printf '%s' "$bad" | tr '\n' ' ')"
+  fail "ports" "docker compose config failed — nothing audited"
 fi
 # services bound only to an inactive profile are dropped from `config`'s
 # runtime model entirely — seed must be absent here, and present only when
@@ -59,7 +63,8 @@ KV="$KERNEL_DIR/.venv/bin/uvicorn"
 [ -x "$KV" ] || KV="$KERNEL_DIR/.venv-verify/bin/uvicorn"   # release-verify venv name
 if [ -x "$KV" ]; then
   KD=$(mktemp -d)
-  ( cd "$KERNEL_DIR" && EWCP_REQUIRE_AUTH=1 EWCP_TENANT_KEYS='k1:tenant-a' \
+  ( cd "$KERNEL_DIR" && env -u EWCP_SEAL_KEY -u EWCP_SEAL_KEY_ID \
+      EWCP_REQUIRE_AUTH=1 EWCP_TENANT_KEYS='k1:tenant-a' \
       EWCP_STORE_DIR="$KD/s" EWCP_WORK_DIR="$KD/w" \
       exec "$KV" app.main:app --port 8210 ) >"$KD/nokey.log" 2>&1 &
   p=$!; sleep 4
@@ -160,11 +165,11 @@ fi
 # ── 4. secret hygiene: real env files must be git-ignored ──────────────
 gi=1
 for f in alpha/kernel.env alpha/product.env; do
-  git check-ignore -q "$f" || { gi=0; break; }
+  git -C "$DEPLOY_DIR" check-ignore -q "$f" || { gi=0; break; }
 done
 # templates must stay committable
-git check-ignore -q alpha/kernel.env.example && gi=0
-git check-ignore -q alpha/product.env.example && gi=0
+git -C "$DEPLOY_DIR" check-ignore -q alpha/kernel.env.example && gi=0
+git -C "$DEPLOY_DIR" check-ignore -q alpha/product.env.example && gi=0
 [ "$gi" = 1 ] \
   && pass "gitignore:env" "alpha/*.env ignored, *.example committable" \
   || fail "gitignore:env" "secret env files not git-ignored (git check-ignore)"

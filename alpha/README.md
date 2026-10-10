@@ -43,10 +43,28 @@ cd <kernel checkout> && .venv/bin/uvicorn app.main:app --port 8000
 
 # 3. Product gateway — auth on (no DEER_FLOW_AUTH_DISABLED), alpha config
 cp alpha/product.config.yaml <product checkout>/config.yaml   # gitignored there
+cp alpha/product.env.example alpha/product.env                 # fill real values (gitignored)
+set -a; . alpha/product.env; set +a   # EWCP_KERNEL_URL/API_KEY + GEMINI_API_KEY + CORS
 cd <product checkout>/backend && PYTHONPATH=. \
-  GATEWAY_CORS_ORIGINS="http://127.0.0.1:2026" \
   .venv/bin/uvicorn app.gateway.app:app --port 8001
+
+# 4. FIRST BOOT — provision the admin BEFORE exposing the gateway to anyone
+# else: POST /api/v1/auth/initialize grants admin to the first caller
+# (intended first-setup flow; allow_registration:false only closes it
+# afterwards). On the loopback-only alpha host this is a local step; on
+# any shared interface, provision first or restrict reachability.
+curl -X POST http://127.0.0.1:8001/api/v1/auth/initialize \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"<admin>","password":"<from secret store>"}'
 ```
+
+**Scope notes.** This recipe boots the Gateway API only — the product
+frontend (Next.js/nginx serving :2026) is part of the product repo's own
+stack and out of this overlay's scope; `GATEWAY_CORS_ORIGINS` is still
+pinned so a frontend added later lands on the expected origin. Transport
+is plain HTTP: acceptable only because alpha publishes loopback-only —
+any non-loopback exposure must sit behind a TLS-terminating proxy or
+session cookies travel unprotected.
 
 ## Validation
 
