@@ -1,0 +1,63 @@
+# Alpha overlay for the ERPNext stack.
+#   docker compose -f docker-compose.yml -f alpha/docker-compose.alpha.yml \
+#     --env-file .env -p ewcp-erp-alpha up -d
+#
+# What it changes vs the dev base:
+#   * seed service is moved behind a `seeds-off` profile that is never
+#     activated — `compose up` no longer re-runs seed_dev.py, so scoped
+#     API creds are not silently rotated on every boot. Alpha creds are
+#     provisioned from the secret store instead.
+#   * frontend publish is re-asserted as loopback-only. If the base file
+#     ever grows a wider bind, this overlay pins it back to 127.0.0.1.
+# Everything else already runs compose-internal (no published ports).
+name: ewcp-erp-alpha
+
+services:
+  seed:
+    profiles: ["seeds-off"]
+
+  frontend:
+    ports:
+      - "127.0.0.1:${HTTP_PORT:-8080}:8080"
+    labels:
+      ewcp.profile: alpha
+
+  # ── create-site: same image/command as dev, but developer_mode=0 ────
+  # Dev flips `developer_mode 1`; Alpha reuses the identical idempotent
+  # creation block then pins `developer_mode 0` (last write wins — and a
+  # re-run on an existing volume keeps enforcing 0). No new service.
+  create-site:
+    command:
+      - bash
+      - -c
+      - >
+        wait-for-it -t 180 db:3306;
+        wait-for-it -t 120 redis-cache:6379;
+        wait-for-it -t 120 redis-queue:6379;
+        export start=`date +%s`;
+        until [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".db_host // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_cache // empty"` ]] && \
+          [[ -n `grep -hs ^ sites/common_site_config.json | jq -r ".redis_queue // empty"` ]];
+        do
+          echo "Waiting for sites/common_site_config.json to be created";
+          sleep 5;
+          if (( `date +%s`-start > 180 )); then
+            echo "could not find sites/common_site_config.json with required keys";
+            exit 1
+          fi
+        done;
+        echo "sites/common_site_config.json found";
+        if [ -d "sites/$$SITE_NAME" ]; then
+          echo "Site $$SITE_NAME already exists, skipping creation";
+        else
+          bench new-site --mariadb-user-host-login-scope='%' --admin-password="$$ADMIN_PASSWORD" --db-root-username=root --db-root-password="$$DB_ROOT_PASSWORD" --install-app erpnext --set-default "$$SITE_NAME";
+        fi;
+        if bench --site "$$SITE_NAME" list-apps 2>/dev/null | grep -qw erp_enterprise_app; then
+          echo "erp_enterprise_app already installed";
+        else
+          ./env/bin/pip install -e ./apps/erp_enterprise_app;
+          bench --site "$$SITE_NAME" install-app erp_enterprise_app;
+        fi;
+        bench --site "$$SITE_NAME" set-config developer_mode 0;
+        bench --site "$$SITE_NAME" set-config mute_emails 1;
+        echo "create-site done";
