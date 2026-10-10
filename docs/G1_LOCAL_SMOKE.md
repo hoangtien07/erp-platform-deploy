@@ -6,7 +6,7 @@ frontend container at `http://localhost:8080` (127.0.0.1 only, no TLS — dev).
 Stack: `frappe/erpnext:v16.50.0` (via `mirror.gcr.io` — Docker Hub anonymous
 pulls were rate-limited on this box), `mariadb:11.8`, `redis:7-alpine`.
 Custom app `erp_enterprise_app` installed from `vendor/erp-enterprise-app`
-(submodule @ `36e40f5`). `frappe.get_installed_apps()` →
+(submodule @ `ebc4140`). `frappe.get_installed_apps()` →
 `['frappe', 'erpnext', 'erp_enterprise_app']` (verified, live query).
 
 Boot timing (measured here, images already local):

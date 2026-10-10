@@ -5,5 +5,5 @@ components:
   ewcp_product:        { ref: "TBD" }
   ewcp_kernel:         { ref: "TBD" }
   erpnext:             { ref: "7474d9e" }   # upstream v16.50.0 tip mirrored
-  erp_enterprise_app:  { ref: "36e40f5e146ea00d33db5fa4a84338638f394f59" }  # vendor submodule, tested vs erpnext v16.50.0
+  erp_enterprise_app:  { ref: "ebc414052ca9811862d08548cb8fdc1d6c0b12d5" }  # vendor submodule, tested vs erpnext v16.50.0
 notes: "bootstrap-0: erpnext + erp_enterprise_app SHAs tested via local G1' dev site (docs/G1_LOCAL_SMOKE.md). ewcp_* refs still TBD."
