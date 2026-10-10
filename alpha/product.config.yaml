@@ -160,6 +160,14 @@ max_recursion_limit: 1000
 #                                      # (optional; omit → hits billed at miss price)
 
 models:
+  # ALPHA: minimal functional entry — deployer may swap providers; the key
+  # resolves from product.env ($VAR expansion), never committed.
+  - name: gemini-3.5-flash-lite
+    display_name: Gemini 3.5 Flash Lite
+    use: langchain_google_genai:ChatGoogleGenerativeAI
+    model: gemini-3.5-flash-lite
+    api_key: $GEMINI_API_KEY
+    max_retries: 2
   # Example: Volcengine (Doubao) model
   # - name: doubao-seed-1.8
   #   display_name: Doubao-Seed-1.8
@@ -1624,6 +1632,11 @@ sandbox:
   image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
   # Host bash stays OFF — pinned explicitly (upstream default is also false).
   allow_host_bash: false
+  # ALPHA: no outbound network from agent sandboxes. `isolated` denies all
+  # egress; `allowlist` exists upstream but needs a proxy image (new infra) —
+  # out of scope for the minimal alpha profile.
+  network:
+    mode: isolated
   # Optional: Mount additional host directories into the sandbox.
   # Each mount maps a host path to a virtual container path accessible by the agent.
   # Note: with LocalSandboxProvider under `make up` (docker-compose), host_path is
@@ -3333,6 +3346,11 @@ authorization:
 # The first admin account is always created through /initialize regardless of this
 # setting, so turning it off cannot lock you out of a fresh install.
 
+# ALPHA: self-registration CLOSED — only /initialize (first-admin) may
+# create accounts; additional users are provisioned by an admin.
+auth:
+  local:
+    allow_registration: false
 # auth:
 #   local:
 #     allow_registration: false

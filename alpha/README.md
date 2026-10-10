@@ -24,6 +24,8 @@ internal network only · no credentials in any file committed here.
 | Product auth enabled | `DEER_FLOW_AUTH_DISABLED` **absent** from env | `alpha/product.env` (absence is the knob) |
 | Product CSRF enabled | `csrf_middleware` is always-on; allowed origins pinned via `GATEWAY_CORS_ORIGINS` | `alpha/product.env` |
 | AioSandbox isolation | `sandbox.use: deerflow.community.aio_sandbox:AioSandboxProvider` + pinned image `…all-in-one-sandbox:1.11.0` | `alpha/product.config.yaml` |
+| AioSandbox network isolated | `sandbox.network.mode: isolated` — spawned on a `--internal` Docker bridge (`gateway_mode` ipv4+ipv6 `isolated`), no route out; requires Docker Engine ≥28 and a local-Docker backend or the provider fails closed | `alpha/product.config.yaml` |
+| Self-registration closed | `auth.local.allow_registration: false` — `POST /register` → 403 `REGISTRATION_DISABLED`; accounts come only from first-admin `/initialize` + admin provisioning | `alpha/product.config.yaml` |
 | LocalSandbox host-bash OFF | `sandbox.allow_host_bash: false` (also the upstream default — pinned explicitly) | `alpha/product.config.yaml` |
 | Product publishes loopback only | `${BIND_HOST:-127.0.0.1}:${PORT}:2026` (product repo compose default) | `ewcp-product/docker/docker-compose*.yaml` |
 | No creds in files | `.env`, `kernel.env`, `product.env`, `secrets/` all gitignored; only `*.example` templates are committed | this directory |
@@ -43,10 +45,37 @@ cd <kernel checkout> && .venv/bin/uvicorn app.main:app --port 8000
 
 # 3. Product gateway — auth on (no DEER_FLOW_AUTH_DISABLED), alpha config
 cp alpha/product.config.yaml <product checkout>/config.yaml   # gitignored there
+cp alpha/product.env.example alpha/product.env                 # fill real values (gitignored)
+set -a; . alpha/product.env; set +a   # EWCP_KERNEL_URL/API_KEY + GEMINI_API_KEY + CORS
 cd <product checkout>/backend && PYTHONPATH=. \
-  GATEWAY_CORS_ORIGINS="http://127.0.0.1:2026" \
   .venv/bin/uvicorn app.gateway.app:app --port 8001
+
+# Model key handling: product.config.yaml references `$GEMINI_API_KEY` in
+# its model section, so the variable must be PRESENT in the gateway's env
+# at boot — an unset var aborts config load (create_app raises). Any
+# non-empty value satisfies the loader, including a placeholder: the
+# gateway boots and only fails when a turn actually calls the model.
+# Supply the real key from the secret store via product.env; the example
+# file's `__FROM_SECRET_STORE__` marker is a valid boot-time placeholder,
+# not a credential.
+
+# 4. FIRST BOOT — provision the admin BEFORE exposing the gateway to anyone
+# else: POST /api/v1/auth/initialize grants admin to the first caller
+# (intended first-setup flow; allow_registration:false only closes it
+# afterwards). On the loopback-only alpha host this is a local step; on
+# any shared interface, provision first or restrict reachability.
+curl -X POST http://127.0.0.1:8001/api/v1/auth/initialize \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"<admin>","password":"<from secret store>"}'
 ```
+
+**Scope notes.** This recipe boots the Gateway API only — the product
+frontend (Next.js/nginx serving :2026) is part of the product repo's own
+stack and out of this overlay's scope; `GATEWAY_CORS_ORIGINS` is still
+pinned so a frontend added later lands on the expected origin. Transport
+is plain HTTP: acceptable only because alpha publishes loopback-only —
+any non-loopback exposure must sit behind a TLS-terminating proxy or
+session cookies travel unprotected.
 
 ## Validation
 
@@ -58,19 +87,27 @@ live secrets:
 2. Kernel deny-boot: `EWCP_REQUIRE_AUTH=1` without `EWCP_SEAL_KEY` must
    not serve `/outcomes`; keyed boot must answer 200; anonymous → 401;
    `erp_write_po` → 404 (allowlist empty).
-3. Product gateway on `product.config.yaml`: `/api/v1/auth/setup-status`
-   answers; anonymous `/api/v1/auth/me` → 401 (auth on).
-   AioSandbox image pull is **not** required for config validation —
-   the provider class resolves at config load; an actual sandboxed run
-   needs the image present on the host.
+3. Product gateway on `product.config.yaml`, spawned env-clean
+   (`env -u GEMINI_API_KEY` + a synthetic placeholder, so ambient env
+   never changes the verdict): anonymous `/api/v1/auth/me` → 401 (auth
+   on); `POST /register` → 403 `REGISTRATION_DISABLED` over real HTTP,
+   then a mutation check flips `allow_registration` on the throwaway
+   config copy — the same probe must be accepted and re-denied on
+   restore, proving the denial tracks the knob; `/api/ewcp/_status`
+   reports kernel configured, `egress.default_mode=local_only`, budget
+   cap $5.00 admission on. If the spawned pid dies while the port still
+   answers, the check FAILs (stale gateway) instead of probing a
+   foreign process.
+4. AioSandbox spawned through the product's own `LocalContainerBackend`
+   fed with this config's `sandbox:` section — asserts the container
+   sits on exactly one network, that bridge is `--internal` with
+   `gateway_mode` ipv4+ipv6 `isolated`, and egress from inside is
+   BLOCKED. Requires Docker Engine ≥28 and the pinned image pullable.
 
 Run: `alpha/validate_alpha_profile.sh` (env: `KERNEL_DIR`, `PRODUCT_DIR`).
 
 ## Known gaps (honest list)
 
-- `create-site` sets `developer_mode 1` on the dev site; for alpha,
-  drop that line or override post-boot (`bench --site … set-config
-  developer_mode 0`). Not enforced by this profile.
 - Frappe `site_config.json` `encryption_key` auto-heal: concurrent
   first-init workers can rotate the key and orphan `__Auth` ciphertext
   (observed 2026-10-10 → deterministic 401s). Mitigation today is
@@ -79,25 +116,33 @@ Run: `alpha/validate_alpha_profile.sh` (env: `KERNEL_DIR`, `PRODUCT_DIR`).
 - ERPNext user/admin passwords + `secrets/ewcp-agent.env` are deploy
   local and expected to be provisioned from the secret store, not
   regenerated by the `seed` service (disabled here).
-- AioSandbox requires the pinned image be pullable on the host; without
-  it the gateway boots but sandboxed turns fail closed.
+- AioSandbox requires the pinned image be pullable on the host and
+  Docker Engine ≥28 for `network.mode: isolated`; without them the
+  gateway boots but sandboxed turns fail closed.
+- `auth.local` fails OPEN if `config.yaml` is absent entirely
+  (`_local_registration_enabled` → FileNotFoundError → True). The
+  recipe copies the shipped config first — do not boot without it.
 
 ## Validator checks (validate_alpha_profile.sh)
 
 `./alpha/validate_alpha_profile.sh` — needs `KERNEL_DIR` + `PRODUCT_DIR`
-checkouts (with their venvs). Measured locally: all checks PASS.
+checkouts (with their venvs). Measured locally: all 15 checks PASS,
+including on a shell with `GEMINI_API_KEY` unset (the product spawn
+strips ambient env and injects its own synthetic key).
 
 | check | what it proves |
 |---|---|
 | `ports` | merged compose publishes loopback-only |
 | `seed-off` | seed service absent from default model; only under `seeds-off` profile |
 | `kernel:deny` / `kernel:keyed` / `kernel:anon` / `kernel:write-gate` | kernel boots with seal + tenant keys, denies unauthenticated + unallowlisted writes |
-| `product:boot` | gateway boots; ewcp-core is `required: true` → boot itself proves mount |
+| `product:boot` | gateway boots; ewcp-core is `required: true` → boot itself proves mount; also fails if our spawn dies while :8211 answers (stale gateway guard) |
 | `product:auth` | anonymous `/api/v1/auth/me` → 401 |
+| `product:register-deny` | real `POST /register` → 403 `REGISTRATION_DISABLED` |
+| `product:register-mutation` | `allow_registration` flipped true → probe accepted (≠403); restored → 403 — denial tracks the knob, not a hard-coded response |
 | `product:policy` | `/api/ewcp/_status` reports kernel configured, `egress.default_mode=local_only`, `budget_cap_usd=5.00`, `budget_admission_enabled=true` |
 | `gitignore:env` | `git check-ignore` on `alpha/kernel.env` + `alpha/product.env`; `*.env.example` stays committable |
 | `erp:devmode` | alpha create-site pins `developer_mode 0` |
-| `sandbox:exec` | real `docker exec` inside the pinned AioSandbox image — isolated hostname + fs |
+| `sandbox:isolated` | real spawn via `LocalContainerBackend` on this config → single `--internal` bridge, `gateway_mode` ipv4+ipv6 `isolated`, `deerflow.network_mode=isolated` label, in-container egress BLOCKED |
 | `sandbox:host-bash` | `allow_host_bash: false` in alpha product config |
 
 ## Additional knobs (council additions)
@@ -108,4 +153,5 @@ checkouts (with their venvs). Measured locally: all checks PASS.
 | ewcp-core mount (`required`) + egress/budget baseline | `alpha/product.config.yaml` `plugins:` |
 | kernel URL/key + egress env overrides | `alpha/product.env` (from `.example`, gitignored) |
 | secret env ignore guard | root `.gitignore` `alpha/*.env` + validator `gitignore:env` |
-| AioSandbox real-exec probe | validator `sandbox:exec` (`docker exec` on the pinned image) |
+| `auth.local.allow_registration: false` | `alpha/product.config.yaml` + validator `register-deny`/`register-mutation` |
+| `sandbox.network.mode: isolated` | `alpha/product.config.yaml` + validator `sandbox:isolated` (docker-inspected spawn) |
