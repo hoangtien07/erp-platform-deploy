@@ -13,7 +13,8 @@ Boot timing (measured here, images already local):
 `docker compose up -d` → first `ping` 200 ≈ **5–6 min**. `create-site`
 (`bench new-site` + `install-app erpnext` + `install-app erp_enterprise_app`)
 is the bulk (~4–5 min); `seed` adds ~30 s. First boot on a cold host adds
-image pull time (ERPNext image ≈ 2.5 GB).
+image pull time (ERPNext image ≈ 6.7 GB unpacked — re-measured 2026-10-10,
+`mirror.gcr.io/frappe/erpnext:v16.50.0`).
 
 ## 1. Guest liveness — `ping`
 

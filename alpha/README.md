@@ -30,7 +30,15 @@ internal network only · no credentials in any file committed here.
 
 ## Boot recipe (single box)
 
+Prereqs: docker + `uv` + host `python3` with `pyyaml`; checkouts of
+`enterprise-work-control-plane` (main) and `ewcp-product` (`product/vnext`
+branch — required for `extensions/ewcp-core`), each with a working venv
+(`<kernel>/.venv`, `<product>/backend/.venv`, e.g. `uv sync`).
+
 ```bash
+# 0. pull the ERP custom-app submodule (mounted into the bench)
+git submodule update --init
+
 # 1. ERPNext — alpha overlay (seed service stays off)
 cp .env.example .env           # fill with deploy-local values (gitignored)
 docker compose -f docker-compose.yml -f alpha/docker-compose.alpha.yml \
@@ -43,8 +51,9 @@ cd <kernel checkout> && .venv/bin/uvicorn app.main:app --port 8000
 
 # 3. Product gateway — auth on (no DEER_FLOW_AUTH_DISABLED), alpha config
 cp alpha/product.config.yaml <product checkout>/config.yaml   # gitignored there
+cp alpha/product.env.example alpha/product.env   # kernel key + CORS + egress (gitignored)
+set -a; . alpha/product.env; set +a
 cd <product checkout>/backend && PYTHONPATH=. \
-  GATEWAY_CORS_ORIGINS="http://127.0.0.1:2026" \
   .venv/bin/uvicorn app.gateway.app:app --port 8001
 ```
 
@@ -64,13 +73,17 @@ live secrets:
    the provider class resolves at config load; an actual sandboxed run
    needs the image present on the host.
 
-Run: `alpha/validate_alpha_profile.sh` (env: `KERNEL_DIR`, `PRODUCT_DIR`).
+Run: `alpha/validate_alpha_profile.sh` (env: `KERNEL_DIR`, `PRODUCT_DIR`)
+**from the repo root** — the `gitignore:env` check is CWD-sensitive on this
+rev (`git check-ignore` has no `-C`), and `KERNEL_DIR`/`PRODUCT_DIR` must be
+checkouts whose venvs already exist (it does not build them).
 
 ## Known gaps (honest list)
 
-- `create-site` sets `developer_mode 1` on the dev site; for alpha,
-  drop that line or override post-boot (`bench --site … set-config
-  developer_mode 0`). Not enforced by this profile.
+- `create-site` pins `developer_mode 0` via the alpha overlay
+  (`docker-compose.alpha.yml` overrides the dev `developer_mode 1`,
+  last write wins) — enforced, and asserted by validator `erp:devmode`.
+  Measured `developer_mode: 0` on a live alpha boot.
 - Frappe `site_config.json` `encryption_key` auto-heal: concurrent
   first-init workers can rotate the key and orphan `__Auth` ciphertext
   (observed 2026-10-10 → deterministic 401s). Mitigation today is
