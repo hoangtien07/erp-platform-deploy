@@ -10,11 +10,13 @@ chứa business code.
 ## Layout
 
 ```
-envs/           # per-environment config (dev, staging, prod)
+alpha/          # alpha deployment profile (compose overlay + envs + validator)
+docker/         # image wiring helpers (dev entrypoint)
+docs/           # runbooks, smoke/audit records
 releases/       # release manifests — pin tested SHAs across repos
-docs/           # runbooks (bootstrap, backup, restore, upgrade)
-docker/         # compose files + images wiring
-scripts/        # operational scripts
+scripts/        # operational scripts (seed_dev.py)
+vendor/         # erp-enterprise-app submodule (mounted into bench)
+docker-compose.yml  # G1′ dev stack — base for the alpha overlay
 ```
 
 ## Release manifest contract
