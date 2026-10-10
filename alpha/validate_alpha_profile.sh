@@ -56,6 +56,7 @@ fi
 
 # ── 2. kernel posture: deny-boot, keyed boot, anon 401, write-gate 404 ──
 KV="$KERNEL_DIR/.venv/bin/uvicorn"
+[ -x "$KV" ] || KV="$KERNEL_DIR/.venv-verify/bin/uvicorn"   # release-verify venv name
 if [ -x "$KV" ]; then
   KD=$(mktemp -d)
   ( cd "$KERNEL_DIR" && EWCP_REQUIRE_AUTH=1 EWCP_TENANT_KEYS='k1:tenant-a' \
@@ -93,12 +94,28 @@ else
   fail "kernel" "$KV missing — set KERNEL_DIR to a checkout with .venv"
 fi
 
-# ── 3. product posture: auth on with the alpha config ───────────────────
+# ── 3. product posture: auth on + ewcp-core mounted with policies ──────
 PV="$PRODUCT_DIR/backend/.venv/bin/uvicorn"
+EXT="$PRODUCT_DIR/backend/extensions/ewcp-core"
 if [ -x "$PV" ]; then
+  # idempotent editable install of the extension into the backend venv
+  (cd "$PRODUCT_DIR/backend" && uv pip install --python .venv/bin/python \
+      -e ./extensions/ewcp-core >/dev/null 2>&1) || \
+    fail "product:ext-install" "uv pip install -e extensions/ewcp-core failed"
   PD=$(mktemp -d); cp "$HERE/product.config.yaml" "$PD/config.yaml"
+  # pin sqlite_dir into the throwaway home (CWD-relative default is the
+  # known deerflow.db escape hatch — would share state across runs)
+  python3 - "$PD" <<'PY'
+import re, sys
+pd = sys.argv[1]
+s = open(pd + "/config.yaml").read()
+s = re.sub(r"(?m)^  sqlite_dir: \.deer-flow/data$",
+           f"  sqlite_dir: {pd}/data", s, count=1)
+open(pd + "/config.yaml", "w").write(s)
+PY
   ( cd "$PRODUCT_DIR/backend" && PYTHONPATH=. DEER_FLOW_HOME="$PD/home" \
-      DEER_FLOW_CONFIG="$PD/config.yaml" \
+      DEER_FLOW_CONFIG_PATH="$PD/config.yaml" \
+      EWCP_KERNEL_URL=http://127.0.0.1:8210 EWCP_KERNEL_API_KEY=k1 \
       exec "$PV" app.gateway.app:app --port 8211 ) >"$PD/gw.log" 2>&1 &
   p=$!; t0=$(date +%s); up=0
   while [ $(( $(date +%s) - t0 )) -lt 40 ]; do
@@ -106,16 +123,83 @@ if [ -x "$PV" ]; then
       >/dev/null 2>&1 && { up=1; break; }; sleep 2
   done
   if [ "$up" = 1 ]; then
-    pass "product:boot" "gateway boots on alpha config (AioSandbox provider resolves)"
+    pass "product:boot" "gateway boots on alpha config (ewcp_core required → mount proven)"
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:8211/api/v1/auth/me")
     [ "$code" = "401" ] && pass "product:auth" "anonymous /me → 401 (auth on)" \
       || fail "product:auth" "anonymous → $code"
+    # extension mount + policy probe — _status sits behind auth, so mint a
+    # synthetic admin + login first (DB lives in the throwaway PD home).
+    curl -sf -X POST "http://127.0.0.1:8211/api/v1/auth/initialize" \
+      -H 'Content-Type: application/json' \
+      -d '{"email":"alpha-validator@ewcp.dev","password":"synth-val-pw-9c4e7a21"}' >/dev/null 2>&1
+    curl -sf -c "$PD/cj" -X POST "http://127.0.0.1:8211/api/v1/auth/login/local" \
+      -d 'username=alpha-validator@ewcp.dev&password=synth-val-pw-9c4e7a21' >/dev/null 2>&1
+    st=$(curl -sf -b "$PD/cj" "http://127.0.0.1:8211/api/ewcp/_status" 2>/dev/null)
+    ok=$(printf '%s' "$st" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+eg = d.get("egress", {})
+ok = (d.get("extension") == "ewcp_core"
+      and d.get("kernel_configured") is True
+      and d.get("api_key_configured") is True
+      and d.get("budget_admission_enabled") is True
+      and d.get("budget_cap_usd") == "5.00"
+      and eg.get("default_mode") == "local_only")
+print("yes" if ok else "no")' 2>/dev/null)
+    [ "$ok" = "yes" ] \
+      && pass "product:policy" "/api/ewcp/_status: kernel configured, egress default_mode=local_only, budget cap \$5.00 admission on" \
+      || fail "product:policy" "_status → ${st:-<unreachable>}"
   else
     fail "product:boot" "gateway did not boot — see $PD/gw.log"
   fi
   kill $p 2>/dev/null; wait $p 2>/dev/null
 else
   fail "product" "$PV missing — set PRODUCT_DIR to a checkout with backend/.venv"
+fi
+
+# ── 4. secret hygiene: real env files must be git-ignored ──────────────
+gi=1
+for f in alpha/kernel.env alpha/product.env; do
+  git check-ignore -q "$f" || { gi=0; break; }
+done
+# templates must stay committable
+git check-ignore -q alpha/kernel.env.example && gi=0
+git check-ignore -q alpha/product.env.example && gi=0
+[ "$gi" = 1 ] \
+  && pass "gitignore:env" "alpha/*.env ignored, *.example committable" \
+  || fail "gitignore:env" "secret env files not git-ignored (git check-ignore)"
+
+# ── 5. ERP developer_mode pinned off for Alpha ─────────────────────────
+grep -q 'set-config developer_mode 0' "$HERE/docker-compose.alpha.yml" \
+  && pass "erp:devmode" "alpha create-site pins developer_mode 0 (dev's '1' overridden)" \
+  || fail "erp:devmode" "no developer_mode 0 pin in alpha overlay"
+
+# ── 6. real isolated AioSandbox execution on the pinned image ─────────
+SB_IMG=$(grep 'image:' "$HERE/product.config.yaml" | head -1 | sed 's/.*image: *//; s/[ "]*$//')
+if [ -n "$SB_IMG" ] && command -v docker >/dev/null 2>&1; then
+  docker image inspect "$SB_IMG" >/dev/null 2>&1 || docker pull -q "$SB_IMG" >/dev/null
+  cid=$(docker run -d --rm --entrypoint sleep "$SB_IMG" 300 2>/dev/null || true)
+  if [ -n "$cid" ]; then
+    sleep 2
+    out=$(docker exec "$cid" bash -c 'hostname; id -u; test -f /etc/hostname && echo ct_fs_ok' 2>/dev/null)
+    hn=$(printf '%s\n' "$out" | head -1)
+    if [ "$hn" != "$(hostname)" ] && printf '%s' "$out" | grep -q ct_fs_ok; then
+      pass "sandbox:exec" "real exec inside $SB_IMG (container hostname $hn, isolated fs)"
+    else
+      fail "sandbox:exec" "exec did not prove isolation (out: ${out:-none})"
+    fi
+    docker kill "$cid" >/dev/null 2>&1
+  else
+    fail "sandbox:exec" "could not start sandbox container ($SB_IMG)"
+  fi
+  # host bash must stay disabled in the alpha product config
+  hb=$(python3 -c '
+import yaml,sys
+c=yaml.safe_load(open(sys.argv[1])); print(c.get("sandbox",{}).get("allow_host_bash"))' "$HERE/product.config.yaml" 2>/dev/null)
+  [ "$hb" = "False" ] && pass "sandbox:host-bash" "allow_host_bash: false (host bash disabled)" \
+    || fail "sandbox:host-bash" "allow_host_bash=$hb"
+else
+  fail "sandbox" "no sandbox image pinned in product.config.yaml or docker missing"
 fi
 
 echo "verdict: $PASS passed, $FAIL failed"

@@ -2593,6 +2593,9 @@ skill_evolution:
 #      its history). The `public` schema should gain no new DeerFlow tables.
 database:
   backend: sqlite
+  # NOTE: `sqlite_dir` is resolved relative to the backend CWD — pin it to an
+  # absolute path inside the durable home on real hosts (a CWD-relative value
+  # silently escapes home-directory backups; see kernel RELEASE_REPRO G11).
   sqlite_dir: .deer-flow/data
 
 # ============================================================================
@@ -3442,3 +3445,23 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+
+# ── Alpha: EWCP core extension — REQUIRED mount. ─────────────────────────
+# ewcp-core provides /api/ewcp/* (execution runs, verify surface, egress +
+# budget-admission middleware). Install into the backend venv:
+#   cd backend && uv pip install --python .venv/bin/python -e ./extensions/ewcp-core
+# Proof of mount: GET /api/ewcp/_status on the running gateway.
+plugins:
+  - name: ewcp_core
+    package: ewcp-core
+    use: ewcp_core:install
+    enabled: true
+    required: true            # alpha fails closed if the ext can't load
+    table_prefix: ewcp_
+    config:
+      kernel_url: http://127.0.0.1:8000   # EWCP_KERNEL_URL env beats this
+      budget: {cap_usd: "5.00", tenant_id: alpha, usd_per_1k_tokens: "0.004",
+               max_output_tokens_per_call: 4096, general_on_policy_unavailable: local}
+      egress: {default_mode: local_only, tenant_modes: {}}
+      invoke: {tenant_id: alpha}
+      general_recursion_limit: 1000
